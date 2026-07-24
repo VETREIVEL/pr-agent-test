@@ -34,6 +34,8 @@ def _build_tools() -> list[types.Tool]:
     ]
     return [types.Tool(function_declarations=declarations)]
 
+def add(num1,num2):
+    return num1+num2
 
 class PRAgent:
     def __init__(self):
