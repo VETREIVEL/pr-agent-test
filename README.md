@@ -71,3 +71,11 @@ You: exit
 | `github.py` | GitHub REST API calls (list, diff, CI, review, merge) |
 
 The agent uses Gemini's native function-calling to decide which GitHub tools to invoke. Merges are always intercepted and require explicit confirmation (`yes` / `no`) before execution.
+
+## How it works
+
+1. GitHub sends a webhook event when a PR is opened
+2. The webhook server receives and validates the request
+3. The agent fetches the PR diff and files
+4. Gemini LLM reviews the code and returns structured JSON
+5. The review is posted back to the PR automatically
