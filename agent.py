@@ -1,14 +1,7 @@
 import os
 import json
-import vertexai
-from vertexai.generative_models import (
-    GenerativeModel,
-    ChatSession,
-    Content,
-    Part,
-    Tool,
-    FunctionDeclaration,
-)
+from google import genai
+from google.genai import types
 from tools import TOOLS, execute_tool
 
 SYSTEM_PROMPT = """You are a senior software engineer and PR review agent.
@@ -30,35 +23,32 @@ Your behavior:
 - Keep responses concise but complete"""
 
 
-def _build_gemini_tools() -> list[Tool]:
+def _build_tools() -> list[types.Tool]:
     declarations = [
-        FunctionDeclaration(
+        types.FunctionDeclaration(
             name=t["name"],
             description=t["description"],
             parameters=t["parameters"],
         )
         for t in TOOLS
     ]
-    return [Tool(function_declarations=declarations)]
+    return [types.Tool(function_declarations=declarations)]
 
 
 class PRAgent:
     def __init__(self):
-        vertexai.init(
+        self.client = genai.Client(
+            vertexai=True,
             project=os.environ["GCP_PROJECT_ID"],
             location=os.environ.get("GCP_REGION", "us-central1"),
         )
-        self.model = GenerativeModel(
-            model_name="gemini-2.0-flash-001",
-            system_instruction=SYSTEM_PROMPT,
-            tools=_build_gemini_tools(),
-        )
+        self.model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        self.tools = _build_tools()
         self.repo = os.environ["GITHUB_REPO"]
-        self.history: list[Content] = []
+        self.history: list[types.Content] = []
         self.pending_merge: int | None = None
 
     def chat(self, user_message: str) -> str:
-        # Handle merge confirmation separately
         if self.pending_merge is not None:
             if user_message.strip().lower() in ("yes", "y", "go ahead", "merge it", "do it", "confirm"):
                 pr_number = self.pending_merge
@@ -68,50 +58,51 @@ class PRAgent:
                 self.pending_merge = None
                 return "Merge cancelled."
 
-        self.history.append(Content(role="user", parts=[Part.from_text(user_message)]))
+        self.history.append(types.Content(role="user", parts=[types.Part.from_text(text=user_message)]))
         response_text = self._run()
-        self.history.append(Content(role="model", parts=[Part.from_text(response_text)]))
+        self.history.append(types.Content(role="model", parts=[types.Part.from_text(text=response_text)]))
         return response_text
 
     def _run(self) -> str:
         messages = list(self.history)
+        config = types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            tools=self.tools,
+        )
 
         while True:
-            response = self.model.generate_content(messages)
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=messages,
+                config=config,
+            )
             candidate = response.candidates[0]
             parts = candidate.content.parts
 
-            # Collect any text parts
             text_parts = [p.text for p in parts if hasattr(p, "text") and p.text]
-
-            # Check for function calls
-            fn_calls = [p.function_call for p in parts if hasattr(p, "function_call") and p.function_call.name]
+            fn_calls = [p.function_call for p in parts if hasattr(p, "function_call") and p.function_call and p.function_call.name]
 
             if not fn_calls:
                 return "\n".join(text_parts)
 
-            # Add model turn to message history
             messages.append(candidate.content)
 
-            # Execute each function call and collect results
             fn_results = []
             for fn_call in fn_calls:
                 name = fn_call.name
                 inputs = dict(fn_call.args)
                 print(f"  [calling {name}({inputs})]")
 
-                # Guard: intercept merge and ask for confirmation
                 if name == "merge_pr":
                     pr_number = int(inputs.get("pr_number", 0))
                     self.pending_merge = pr_number
                     fn_results.append(
-                        Part.from_function_response(
+                        types.Part.from_function_response(
                             name=name,
                             response={"result": "Merge blocked — waiting for explicit user confirmation."},
                         )
                     )
-                    # Add the function response and return early
-                    messages.append(Content(role="user", parts=fn_results))
+                    messages.append(types.Content(role="user", parts=fn_results))
                     return f"Ready to merge PR #{pr_number} using squash strategy. Type **yes** to confirm or **no** to cancel."
 
                 try:
@@ -121,11 +112,10 @@ class PRAgent:
                     result = {"error": str(e)}
 
                 fn_results.append(
-                    Part.from_function_response(name=name, response={"result": result})
+                    types.Part.from_function_response(name=name, response={"result": result})
                 )
 
-            messages.append(Content(role="user", parts=fn_results))
-            # loop continues with function results fed back
+            messages.append(types.Content(role="user", parts=fn_results))
 
     def _do_merge(self, pr_number: int) -> str:
         try:
