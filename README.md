@@ -71,3 +71,4 @@ You: exit
 | `github.py` | GitHub REST API calls (list, diff, CI, review, merge) |
 
 The agent uses Gemini's native function-calling to decide which GitHub tools to invoke. Merges are always intercepted and require explicit confirmation (`yes` / `no`) before execution.
+# test change
