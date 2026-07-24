@@ -1,22 +1,21 @@
 import json
 import github
 
-# Tool definitions for Claude API (raw JSON schema format)
+# Vertex AI Gemini uses the same tool schema format (OpenAPI / JSON Schema)
 
 TOOLS = [
     {
         "name": "list_open_prs",
         "description": "List all open pull requests in the repository.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {},
-            "required": [],
         },
     },
     {
         "name": "get_pr_details",
         "description": "Get metadata for a pull request: title, author, branch, file counts, merge status.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "pr_number": {"type": "integer", "description": "The PR number to fetch details for."},
@@ -27,7 +26,7 @@ TOOLS = [
     {
         "name": "get_pr_diff",
         "description": "Get the full unified diff of a pull request. Use this to review code changes.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "pr_number": {"type": "integer", "description": "The PR number to fetch the diff for."},
@@ -38,7 +37,7 @@ TOOLS = [
     {
         "name": "get_pr_files",
         "description": "Get the list of files changed in a pull request with per-file diffs.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "pr_number": {"type": "integer", "description": "The PR number."},
@@ -49,7 +48,7 @@ TOOLS = [
     {
         "name": "get_ci_status",
         "description": "Get CI check results for a pull request (passing, failing, pending).",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "pr_number": {"type": "integer", "description": "The PR number."},
@@ -60,7 +59,7 @@ TOOLS = [
     {
         "name": "post_review",
         "description": "Post a review on a pull request. Use event=COMMENT for feedback, APPROVE to approve, REQUEST_CHANGES to request changes.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "pr_number": {"type": "integer", "description": "The PR number."},
@@ -77,7 +76,7 @@ TOOLS = [
     {
         "name": "merge_pr",
         "description": "Merge a pull request. Only call this after the user has explicitly confirmed they want to merge.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "pr_number": {"type": "integer", "description": "The PR number to merge."},

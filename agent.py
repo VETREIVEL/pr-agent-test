@@ -1,5 +1,14 @@
 import os
-import anthropic
+import json
+import vertexai
+from vertexai.generative_models import (
+    GenerativeModel,
+    ChatSession,
+    Content,
+    Part,
+    Tool,
+    FunctionDeclaration,
+)
 from tools import TOOLS, execute_tool
 
 SYSTEM_PROMPT = """You are a senior software engineer and PR review agent.
@@ -18,92 +27,105 @@ Your behavior:
 - Check CI status as part of every review
 - NEVER merge without explicit user confirmation ("yes", "go ahead", "merge it")
 - Before merging, always summarize what you're about to do and ask for confirmation
-- Keep responses concise but complete
+- Keep responses concise but complete"""
 
-You are chatting interactively — the user may ask follow-up questions about the PR,
-ask you to explain specific parts, or decide to merge. Stay in context across the conversation."""
+
+def _build_gemini_tools() -> list[Tool]:
+    declarations = [
+        FunctionDeclaration(
+            name=t["name"],
+            description=t["description"],
+            parameters=t["parameters"],
+        )
+        for t in TOOLS
+    ]
+    return [Tool(function_declarations=declarations)]
 
 
 class PRAgent:
     def __init__(self):
-        self.client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        vertexai.init(
+            project=os.environ["GCP_PROJECT_ID"],
+            location=os.environ.get("GCP_REGION", "us-central1"),
+        )
+        self.model = GenerativeModel(
+            model_name="gemini-2.0-flash-001",
+            system_instruction=SYSTEM_PROMPT,
+            tools=_build_gemini_tools(),
+        )
         self.repo = os.environ["GITHUB_REPO"]
-        self.history = []
-        self.pending_merge = None  # tracks if we're waiting for merge confirmation
+        self.history: list[Content] = []
+        self.pending_merge: int | None = None
 
     def chat(self, user_message: str) -> str:
-        # Check for merge confirmation
-        if self.pending_merge and user_message.strip().lower() in ("yes", "y", "go ahead", "merge it", "do it", "confirm"):
-            pr_number = self.pending_merge
-            self.pending_merge = None
-            return self._do_merge(pr_number)
+        # Handle merge confirmation separately
+        if self.pending_merge is not None:
+            if user_message.strip().lower() in ("yes", "y", "go ahead", "merge it", "do it", "confirm"):
+                pr_number = self.pending_merge
+                self.pending_merge = None
+                return self._do_merge(pr_number)
+            if user_message.strip().lower() in ("no", "n", "cancel", "stop"):
+                self.pending_merge = None
+                return "Merge cancelled."
 
-        if self.pending_merge and user_message.strip().lower() in ("no", "n", "cancel", "stop"):
-            self.pending_merge = None
-            return "Merge cancelled."
+        self.history.append(Content(role="user", parts=[Part.from_text(user_message)]))
+        response_text = self._run()
+        self.history.append(Content(role="model", parts=[Part.from_text(response_text)]))
+        return response_text
 
-        self.history.append({"role": "user", "content": user_message})
-        response = self._run(self.history)
-        self.history.append({"role": "assistant", "content": response})
-        return response
+    def _run(self) -> str:
+        messages = list(self.history)
 
-    def _run(self, messages: list) -> str:
         while True:
-            resp = self.client.messages.create(
-                model="claude-opus-4-8",
-                max_tokens=4096,
-                thinking={"type": "adaptive"},
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=messages,
-            )
+            response = self.model.generate_content(messages)
+            candidate = response.candidates[0]
+            parts = candidate.content.parts
 
-            # Collect all text from the response
-            text_parts = [b.text for b in resp.content if b.type == "text"]
+            # Collect any text parts
+            text_parts = [p.text for p in parts if hasattr(p, "text") and p.text]
 
-            if resp.stop_reason == "end_turn":
+            # Check for function calls
+            fn_calls = [p.function_call for p in parts if hasattr(p, "function_call") and p.function_call.name]
+
+            if not fn_calls:
                 return "\n".join(text_parts)
 
-            if resp.stop_reason == "tool_use":
-                # Add assistant turn with all content blocks
-                messages = messages + [{"role": "assistant", "content": resp.content}]
+            # Add model turn to message history
+            messages.append(candidate.content)
 
-                # Execute all tool calls
-                tool_results = []
-                for block in resp.content:
-                    if block.type != "tool_use":
-                        continue
+            # Execute each function call and collect results
+            fn_results = []
+            for fn_call in fn_calls:
+                name = fn_call.name
+                inputs = dict(fn_call.args)
+                print(f"  [calling {name}({inputs})]")
 
-                    print(f"  [calling {block.name}({block.input})]")
+                # Guard: intercept merge and ask for confirmation
+                if name == "merge_pr":
+                    pr_number = int(inputs.get("pr_number", 0))
+                    self.pending_merge = pr_number
+                    fn_results.append(
+                        Part.from_function_response(
+                            name=name,
+                            response={"result": "Merge blocked — waiting for explicit user confirmation."},
+                        )
+                    )
+                    # Add the function response and return early
+                    messages.append(Content(role="user", parts=fn_results))
+                    return f"Ready to merge PR #{pr_number} using squash strategy. Type **yes** to confirm or **no** to cancel."
 
-                    # Guard: require confirmation before merge
-                    if block.name == "merge_pr":
-                        pr_number = block.input.get("pr_number")
-                        self.pending_merge = pr_number
-                        # Return without executing — ask user to confirm
-                        messages = messages + [{
-                            "role": "user",
-                            "content": [{
-                                "type": "tool_result",
-                                "tool_use_id": block.id,
-                                "content": "Merge blocked — waiting for user confirmation.",
-                            }]
-                        }]
-                        return f"Ready to merge PR #{pr_number}. Type **yes** to confirm or **no** to cancel."
+                try:
+                    result_str = execute_tool(name, inputs, self.repo)
+                    result = json.loads(result_str) if result_str.startswith(("{", "[")) else {"result": result_str}
+                except Exception as e:
+                    result = {"error": str(e)}
 
-                    try:
-                        result = execute_tool(block.name, block.input, self.repo)
-                    except Exception as e:
-                        result = f"Error: {e}"
+                fn_results.append(
+                    Part.from_function_response(name=name, response={"result": result})
+                )
 
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result,
-                    })
-
-                messages = messages + [{"role": "user", "content": tool_results}]
-                # loop continues with tool results
+            messages.append(Content(role="user", parts=fn_results))
+            # loop continues with function results fed back
 
     def _do_merge(self, pr_number: int) -> str:
         try:
