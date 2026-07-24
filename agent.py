@@ -20,6 +20,7 @@ Your behavior:
 - Check CI status as part of every review
 - NEVER merge without explicit user confirmation ("yes", "go ahead", "merge it")
 - Before merging, always summarize what you're about to do and ask for confirmation
+- NEVER call post_review with event=APPROVE or event=REQUEST_CHANGES unless the user explicitly asks you to approve or request changes (e.g. "approve it", "approve the PR", "request changes"). A review request means give a written analysis only — use event=COMMENT if you must post, or just respond in chat without posting at all
 - Keep responses concise but complete"""
 
 
@@ -47,16 +48,29 @@ class PRAgent:
         self.repo = os.environ["GITHUB_REPO"]
         self.history: list[types.Content] = []
         self.pending_merge: int | None = None
+        self.pending_review: dict | None = None
 
     def chat(self, user_message: str) -> str:
+        confirmed = user_message.strip().lower() in ("yes", "y", "go ahead", "do it", "confirm")
+        cancelled = user_message.strip().lower() in ("no", "n", "cancel", "stop")
+
         if self.pending_merge is not None:
-            if user_message.strip().lower() in ("yes", "y", "go ahead", "merge it", "do it", "confirm"):
+            if confirmed:
                 pr_number = self.pending_merge
                 self.pending_merge = None
                 return self._do_merge(pr_number)
-            if user_message.strip().lower() in ("no", "n", "cancel", "stop"):
+            if cancelled:
                 self.pending_merge = None
                 return "Merge cancelled."
+
+        if self.pending_review is not None:
+            if confirmed:
+                review = self.pending_review
+                self.pending_review = None
+                return self._do_review(review)
+            if cancelled:
+                self.pending_review = None
+                return "Review cancelled."
 
         self.history.append(types.Content(role="user", parts=[types.Part.from_text(text=user_message)]))
         response_text = self._run()
@@ -105,6 +119,18 @@ class PRAgent:
                     messages.append(types.Content(role="user", parts=fn_results))
                     return f"Ready to merge PR #{pr_number} using squash strategy. Type **yes** to confirm or **no** to cancel."
 
+                if name == "post_review" and inputs.get("event") in ("APPROVE", "REQUEST_CHANGES"):
+                    self.pending_review = inputs
+                    action = inputs["event"].lower().replace("_", " ")
+                    fn_results.append(
+                        types.Part.from_function_response(
+                            name=name,
+                            response={"result": f"Blocked — waiting for explicit user confirmation to {action}."},
+                        )
+                    )
+                    messages.append(types.Content(role="user", parts=fn_results))
+                    return f"I'd like to post a **{inputs['event']}** review on PR #{inputs.get('pr_number')}. Type **yes** to confirm or **no** to cancel."
+
                 try:
                     result_str = execute_tool(name, inputs, self.repo)
                     result = json.loads(result_str) if result_str.startswith(("{", "[")) else {"result": result_str}
@@ -116,6 +142,19 @@ class PRAgent:
                 )
 
             messages.append(types.Content(role="user", parts=fn_results))
+
+    def _do_review(self, inputs: dict) -> str:
+        try:
+            import github
+            result = github.post_review(
+                self.repo,
+                inputs["pr_number"],
+                inputs["body"],
+                inputs["event"],
+            )
+            return f"Review posted (id: {result['id']}, state: {result['state']})"
+        except Exception as e:
+            return f"Review failed: {e}"
 
     def _do_merge(self, pr_number: int) -> str:
         try:
