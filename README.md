@@ -40,15 +40,7 @@ pip install -r requirements.txt
 Copy the values below into a `.env` file at the project root:
 
 ```env
-GITHUB_TOKEN=ghp_...                    # GitHub PAT with repo scope
-GITHUB_REPO=owner/repo                  # repo to watch for PRs
-GCP_PROJECT_ID=my-project               # GCP project with Vertex AI enabled
-GCP_REGION=us-central1                  # Vertex AI region
-GEMINI_MODEL=gemini-2.5-flash           # optional, this is the default
-GITHUB_WEBHOOK_SECRET=your-secret       # run: openssl rand -hex 20
-PORT=8000                               # local server port
-NGROK_AUTHTOKEN=your-ngrok-authtoken    # from dashboard.ngrok.com
-```
+
 
 `.env` is gitignored and will never be committed.
 
